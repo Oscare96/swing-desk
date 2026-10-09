@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+.env
+reports/backtest_trades.csv
+reports/backtest_equity.csv

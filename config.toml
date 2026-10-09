@@ -1,0 +1,65 @@
+# Swing desk v1 configuration.
+# IMPORTANT: changing ANY value here changes the config hash, which invalidates
+# the last backtest report. Paper trading will refuse to start until you re-run
+# `python -m tradingbot backtest` and the new config passes the gates again.
+
+[account]
+starting_capital = 25000.0
+core_fraction = 0.70          # share of equity in the regime-managed SPY core
+satellite_fraction = 0.30     # share of equity the swing desk may risk
+park_idle_cash_in_spy = true  # idle satellite cash sits in SPY while regime is risk-on
+
+[regime]
+benchmark = "SPY"
+sma_days = 200
+band_pct = 0.02               # SPY must cross the 200d SMA by 2% to flip (cuts whipsaw)
+
+[strategy]
+# Pullback in an uptrend (mean reversion inside a trend), long only.
+trend_sma = 200               # stock must close above its own 200d SMA
+rsi_days = 3
+rsi_entry_below = 15.0        # enter when RSI(3) closes below this
+min_price = 10.0
+min_dollar_volume = 20000000  # 20-day average $ volume
+exit_sma = 10                 # exit when close > 10d SMA (the bounce)
+max_hold_days = 10            # time stop
+atr_days = 14
+stop_atr_mult = 2.5           # protective stop distance, sits at the broker
+
+[risk]
+risk_per_trade_pct = 0.0075   # 0.75% of SATELLITE equity lost if the stop hits
+max_position_pct = 0.20       # of satellite equity
+max_positions = 6
+max_new_entries_per_day = 3
+satellite_drawdown_halt_pct = 0.12   # halt new entries if the desk falls 12% from its peak
+daily_loss_halt_pct = 0.03           # halt new entries for the day if account down 3% today
+max_data_age_days = 4                # refuse to trade on stale bars
+
+[costs]
+slippage_bps = 5.0            # per side, applied to every fill
+commission_per_share = 0.0
+
+[backtest]
+start = "2020-01-01"
+end = "2025-12-31"
+in_sample_end = "2022-12-31"  # 2020-2022 in sample, 2023-2025 out of sample
+
+[gates]
+# All must pass on the OUT-OF-SAMPLE period for paper trading to unlock.
+min_trades = 60
+min_profit_factor = 1.15
+min_sharpe = 0.50             # desk only (trades, excluding parked SPY), annualised
+max_drawdown = 0.20           # desk only
+min_win_rate = 0.50
+# Whole portfolio (core + satellite) must not be meaningfully worse than SPY
+# on a risk-adjusted basis.
+max_sharpe_shortfall_vs_spy = 0.15
+# Robustness: share of nearby parameter sets that must stay profitable (full period).
+min_robust_share = 0.70
+
+[llm]
+# Optional veto filter. It can only REMOVE candidates, never add or resize them.
+# Not used in backtests (it cannot be tested honestly on past data).
+enabled = false
+model = "claude-sonnet-5-5"
+max_calls_per_day = 20

@@ -1,0 +1,13 @@
+modules = ["python-3.12"]
+run = "python -m tradingbot serve"
+
+[nix]
+channel = "stable-24_05"
+
+[deployment]
+deploymentTarget = "vm"
+run = ["sh", "-c", "pip install -q -r requirements.txt && python -m tradingbot serve"]
+
+[[ports]]
+localPort = 8000
+externalPort = 80
