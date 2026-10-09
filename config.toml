@@ -22,6 +22,7 @@ rsi_entry_below = 15.0        # enter when RSI(3) closes below this
 min_price = 10.0
 min_dollar_volume = 20000000  # 20-day average $ volume
 exit_sma = 10                 # exit when close > 10d SMA (the bounce)
+entry_spy_sma50_filter = false  # experiment (default off): no new entries unless SPY closed above its 50d SMA
 max_hold_days = 10            # time stop
 atr_days = 14
 stop_atr_mult = 2.5           # protective stop distance, sits at the broker

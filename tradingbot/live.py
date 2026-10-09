@@ -225,7 +225,24 @@ class Desk:
         spy_val = float(positions[self.bench]["market_value"]) if self.bench in positions else 0.0
         desk_eq = self._desk_equity(positions)
         desk_peak = max(self.store.get("desk_peak", desk_eq), desk_eq)
-        self.store.set("desk_peak", desk_peak)
+        if not dry_run:
+            self.store.set("desk_peak", desk_peak)
+        # ----- breaker auto-reset: same 20-session cooldown the backtest assumes.
+        # A manual reset from the dashboard still clears it earlier.
+        # Sessions counted are mornings the app actually ran; if the app was down
+        # for a few days the halt simply lasts longer (safe side).
+        # A dry run must never mutate breaker state: it only reports.
+        auto_reset = False
+        if self.store.get("halted") and not dry_run:
+            left = int(self.store.get("halt_sessions_left", 20) or 0) - 1
+            self.store.set("halt_sessions_left", max(left, 0))
+            if left <= 0:
+                auto_reset = True
+                self.store.set("halted", False)
+                self.store.set("desk_peak", desk_eq)
+                desk_peak = desk_eq  # backtest also re-bases the peak on reset
+                self.store.log("control", f"circuit breaker auto-reset after 20 sessions; new peak ${desk_eq:,.0f}")
+                notify("Circuit breaker", "Auto-reset after the 20-session cooldown. New entries allowed again.", urgent=True)
         state = RiskState(
             satellite_equity=sat_eq, satellite_cash=max(0.0, sat_eq - held_val),
             desk_equity=desk_eq, desk_peak=desk_peak, account_equity=equity, day_start_equity=last_equity,
@@ -233,13 +250,18 @@ class Desk:
             entries_today=sum(1 for p in plans.values() if p["entry_date"] == today),
             paused=bool(self.store.get("paused", False)), halted=bool(self.store.get("halted", False)),
         )
-        if drawdown_breached(state, rp) and not state.halted:
-            self.store.set("halted", True)
-            state.halted = True
-            notify("Circuit breaker", "Desk drawdown limit hit. New entries halted until you reset it.", urgent=True)
+        if not auto_reset and drawdown_breached(state, rp) and not state.halted:
+            state.halted = True  # report the breach either way; only a live run latches it
+            if not dry_run:
+                self._latch_breaker(20)  # morning halt already blocks this morning: 20 ticks = 20 opens
+            notify("Circuit breaker", "Desk drawdown limit hit. New entries halted for 20 sessions, or until you reset it on the dashboard.", urgent=True)
 
         # ---------------- entries
         cands = candidates_on(last, feats, exclude=set(plans))
+        if getattr(sp, "entry_spy_sma50_filter", False):
+            sma50 = float(spy["close"].rolling(50).mean().iloc[-1])
+            if not (float(spy["close"].iloc[-1]) > sma50):
+                cands = []  # experiment: SPY must have closed above its 50d SMA
         cands = cands[: rp.max_new_entries_per_day * 3]
         vetoes = self._llm_vetoes(cands, feats) if cands and cfg.llm.enabled and allow_entries else {}
         entries_value = 0.0
@@ -357,8 +379,8 @@ class Desk:
         spy_px = float(positions[self.bench]["current_price"]) if self.bench in positions else None
         self.store.record_equity(today, equity, spy_px, desk_eq, bool(self.store.get("regime_on", False)))
         if desk_eq < peak * (1 - self.cfg.risk.satellite_drawdown_halt_pct) and not self.store.get("halted"):
-            self.store.set("halted", True)
-            notify("Circuit breaker", f"Desk down {1 - desk_eq / peak:.1%} from peak. New entries halted.", urgent=True)
+            self._latch_breaker(21)  # halt found after the close: 21 ticks block the next 20 opens
+            notify("Circuit breaker", f"Desk down {1 - desk_eq / peak:.1%} from peak. New entries halted for 20 sessions, or until you reset it on the dashboard.", urgent=True)
         self.store.set("eod_done", today)
         msg = f"Equity ${equity:,.0f} | desk ${desk_eq:,.0f} (peak ${peak:,.0f}) | {len(self.store.plans())} swing positions"
         self.store.log("eod", msg)
@@ -370,9 +392,16 @@ class Desk:
         self.store.set("paused", on)
         self.store.log("control", "new entries paused" if on else "new entries resumed")
 
+    def _latch_breaker(self, sessions_left: int):
+        """Halt new entries; morning()'s countdown clears the halt after the
+        cooldown, mirroring the backtest's 20 blocked opens."""
+        self.store.set("halted", True)
+        self.store.set("halt_sessions_left", sessions_left)
+
     def reset_breaker(self):
         desk_eq = self._desk_equity(self.broker.positions())
         self.store.set("halted", False)
+        self.store.set("halt_sessions_left", 0)
         self.store.set("desk_peak", desk_eq)
         self.store.log("control", f"circuit breaker reset; new peak ${desk_eq:,.0f}")
 

@@ -231,3 +231,208 @@ class Reconcile(unittest.TestCase):
         stops = [o for o in broker.sent if o.get("type_") == "stop"]
         self.assertEqual(len(stops), 1)
         self.assertEqual(stops[0]["stop_price"], 47.5)
+
+
+class DataLoader(unittest.TestCase):
+    """fetch_alpaca must fail loudly when the API keeps rate-limiting."""
+
+    def test_raises_after_repeated_429(self):
+        import requests
+        from unittest import mock
+        from tradingbot import data as data_mod
+
+        resp = mock.Mock()
+        resp.status_code = 429
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError("429 Too Many Requests")
+        with mock.patch("requests.get", return_value=resp), \
+             mock.patch.object(data_mod, "alpaca_headers", return_value={}), \
+             mock.patch("time.sleep", return_value=None):
+            with self.assertRaises(requests.exceptions.HTTPError):
+                data_mod.fetch_alpaca(["AAA"], "2020-01-01", "2020-01-10")
+
+    def test_retries_then_succeeds(self):
+        from unittest import mock
+        from tradingbot import data as data_mod
+
+        bad = mock.Mock()
+        bad.status_code = 429
+        good = mock.Mock()
+        good.status_code = 200
+        good.json.return_value = {"bars": {"AAA": []}}
+        good.raise_for_status.return_value = None
+        with mock.patch("requests.get", side_effect=[bad, good]), \
+             mock.patch.object(data_mod, "alpaca_headers", return_value={}), \
+             mock.patch("time.sleep", return_value=None):
+            out = data_mod.fetch_alpaca(["AAA"], "2020-01-01", "2020-01-10")
+        self.assertEqual(out, {})
+
+
+class BreakerAutoReset(unittest.TestCase):
+    """The live breaker must reset itself after 20 sessions, like the backtest."""
+
+    def _desk(self, store):
+        import tradingbot.live as live
+        from tradingbot.broker import DryRunBroker
+        live.trading_unlocked = lambda cfg: (True, "test")
+        live.UNIVERSE = SYMS
+        broker = DryRunBroker(equity=25000)
+        return live.Desk(CFG, broker, store, bars_loader=lambda s, a, z: bars(),
+                         today_fn=lambda: date(2024, 1, 2))
+
+    def test_auto_resets_after_20_sessions(self):
+        import tradingbot.live as live
+        from tradingbot.store import Store
+        orig_unlock, orig_univ = live.trading_unlocked, live.UNIVERSE
+        try:
+            store = Store(":memory:")
+            store.set("halted", True)
+            store.set("halt_sessions_left", 1)
+            self._desk(store).morning()
+        finally:
+            live.trading_unlocked, live.UNIVERSE = orig_unlock, orig_univ
+        self.assertFalse(store.get("halted"))
+
+    def test_counts_down_while_halted(self):
+        import tradingbot.live as live
+        from tradingbot.store import Store
+        orig_unlock, orig_univ = live.trading_unlocked, live.UNIVERSE
+        try:
+            store = Store(":memory:")
+            store.set("halted", True)
+            store.set("halt_sessions_left", 5)
+            self._desk(store).morning()
+        finally:
+            live.trading_unlocked, live.UNIVERSE = orig_unlock, orig_univ
+        self.assertTrue(store.get("halted"))
+        self.assertEqual(store.get("halt_sessions_left"), 4)
+
+    def test_manual_reset_still_works(self):
+        import tradingbot.live as live
+        from tradingbot.broker import DryRunBroker
+        from tradingbot.store import Store
+        store, broker = Store(":memory:"), DryRunBroker(equity=25000)
+        store.set("halted", True)
+        store.set("halt_sessions_left", 20)
+        desk = live.Desk(CFG, broker, store, today_fn=lambda: date(2024, 1, 2))
+        desk.reset_breaker()
+        self.assertFalse(store.get("halted"))
+        self.assertEqual(store.get("halt_sessions_left"), 0)
+
+    def test_dry_run_does_not_mutate_breaker_state(self):
+        """python -m tradingbot run --dry-run is documented as side-effect free."""
+        import tradingbot.live as live
+        from tradingbot.store import Store
+        orig_unlock, orig_univ = live.trading_unlocked, live.UNIVERSE
+        try:
+            store = Store(":memory:")
+            store.set("halted", True)
+            store.set("halt_sessions_left", 1)
+            self._desk(store).morning(dry_run=True)
+        finally:
+            live.trading_unlocked, live.UNIVERSE = orig_unlock, orig_univ
+        self.assertTrue(store.get("halted"))
+        self.assertEqual(store.get("halt_sessions_left"), 1)
+
+    def test_dry_run_breach_saves_nothing(self):
+        """A dry run that detects a breach must not persist halted, the counter,
+        or a new peak -- it only reports."""
+        import tradingbot.live as live
+        from tradingbot.store import Store
+        orig_unlock, orig_univ = live.trading_unlocked, live.UNIVERSE
+        try:
+            store = Store(":memory:")
+            store.set("desk_peak", 100000.0)  # force a 12% drawdown breach
+            self._desk(store).morning(dry_run=True)
+        finally:
+            live.trading_unlocked, live.UNIVERSE = orig_unlock, orig_univ
+        self.assertFalse(store.get("halted"))
+        self.assertFalse(store.get("halt_sessions_left"))
+        self.assertEqual(store.get("desk_peak"), 100000.0)
+
+    def _run_until_clear(self, store, desk, limit=40):
+        n = 0
+        while store.get("halted") and n < limit:
+            desk.morning()
+            n += 1
+        return n
+
+    def test_morning_halt_blocks_20_opens(self):
+        """A breach found in the morning blocks that morning + 19 more opens,
+        matching a backtest breach at the prior close."""
+        import tradingbot.live as live
+        from tradingbot.store import Store
+        orig_unlock, orig_univ = live.trading_unlocked, live.UNIVERSE
+        try:
+            store = Store(":memory:")
+            desk = self._desk(store)
+            store.set("desk_peak", 100000.0)  # force a 12% drawdown breach
+            desk.morning()  # halt latches here; this morning's entries blocked
+            self.assertTrue(store.get("halted"))
+            n = 1 + self._run_until_clear(store, desk)
+            # halt morning + 20 countdown mornings, the last of which resets:
+            # 20 blocked opens, matching a backtest breach at the prior close
+            self.assertEqual(n, 21)
+        finally:
+            live.trading_unlocked, live.UNIVERSE = orig_unlock, orig_univ
+
+    def test_eod_halt_blocks_20_opens(self):
+        """A breach found after the close blocks the next 20 opens,
+        matching a backtest breach at that close."""
+        import tradingbot.live as live
+        from tradingbot.store import Store
+        orig_unlock, orig_univ = live.trading_unlocked, live.UNIVERSE
+        try:
+            store = Store(":memory:")
+            desk = self._desk(store)
+            store.set("desk_peak", 100000.0)  # force a 12% drawdown breach
+            desk.end_of_day()  # halt latches here; next morning is the first blocked open
+            self.assertTrue(store.get("halted"))
+            self.assertEqual(store.get("halt_sessions_left"), 21)
+            n = self._run_until_clear(store, desk)
+            self.assertEqual(n, 21)  # 20 blocked opens, the 21st morning resets
+            self.assertFalse(store.get("halted"))
+        finally:
+            live.trading_unlocked, live.UNIVERSE = orig_unlock, orig_univ
+
+
+class Spy50Filter(unittest.TestCase):
+    def test_off_by_default(self):
+        self.assertFalse(CFG.strategy.entry_spy_sma50_filter)
+
+    def test_filter_blocks_only_allowed_days(self):
+        """With the filter on, every trade's signal day must have SPY above its 50d SMA."""
+        b = bars()
+        res = run_backtest(b, CFG.with_overrides("strategy", entry_spy_sma50_filter=True), START, END)
+        self.assertGreater(len(res.trades), 0)
+        spy = b["SPY"]["close"]
+        sma50 = spy.rolling(50).mean()
+        sessions = spy.index
+        for _, t in res.trades.iterrows():
+            sig = sessions[sessions < pd.Timestamp(t["entry_date"])][-1]
+            self.assertTrue(sma50.loc[sig] > 0)
+            self.assertGreater(float(spy.loc[sig]), float(sma50.loc[sig]))
+
+    def test_live_sends_no_buys_when_spy_below_50d(self):
+        import tradingbot.live as live
+        from tradingbot.broker import DryRunBroker
+        from tradingbot.store import Store
+
+        b = bars()
+        spy = b["SPY"]["close"]
+        sma50 = spy.rolling(50).mean()
+        sessions = spy.index
+        day = next(d for d in sessions[300:] if float(spy.loc[d]) < float(sma50.loc[d]))
+        today = sessions[sessions.get_loc(day) + 1].date()
+        cfg2 = CFG.with_overrides("strategy", entry_spy_sma50_filter=True)
+        orig_unlock, orig_univ = live.trading_unlocked, live.UNIVERSE
+        live.trading_unlocked = lambda cfg: (True, "test")
+        live.UNIVERSE = SYMS
+        try:
+            broker, store = DryRunBroker(equity=25000), Store(":memory:")
+            desk = live.Desk(cfg2, broker, store, bars_loader=lambda s, a, z: b,
+                             today_fn=lambda: today)
+            desk.morning()
+        finally:
+            live.trading_unlocked, live.UNIVERSE = orig_unlock, orig_univ
+        buys = [o for o in broker.sent if o.get("side") == "buy" and o.get("symbol") != "SPY"]
+        self.assertEqual(buys, [])

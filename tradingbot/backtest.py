@@ -64,6 +64,7 @@ def run_backtest(bars: dict[str, pd.DataFrame], cfg, start: str, end: str) -> Re
     RSI, ATR, ADV = (_panel(feats, c, dates) for c in ("rsi", "atr", "adv"))
     so, sc = spy["open"].reindex(dates).to_numpy(), spy["close"].reindex(dates).to_numpy()
     risk_on = risk_on_all.reindex(dates).fillna(False).to_numpy()
+    sma50 = spy["close"].rolling(50).mean().reindex(dates).to_numpy()
     idx = {s: j for j, s in enumerate(syms)}
 
     cap = ck.starting_capital
@@ -232,6 +233,8 @@ def run_backtest(bars: dict[str, pd.DataFrame], cfg, start: str, end: str) -> Re
         # ----- CLOSE: entries for tomorrow
         core_target_on = bool(risk_on[i])
         cand = np.nonzero(ENTRY[i])[0]
+        if getattr(sp, "entry_spy_sma50_filter", False) and not (sc[i] > sma50[i]):
+            cand = []  # experiment: SPY must have closed above its 50d SMA
         cand = sorted(cand, key=lambda j: (RSI[i, j], -ADV[i, j]))
         for j in cand:
             sym = syms[j]

@@ -65,6 +65,11 @@ def fetch_alpaca(symbols: list[str], start: str, end: str) -> dict[str, pd.DataF
                     continue
                 r.raise_for_status()
                 break
+            else:
+                # Every attempt hit the rate limit: fail loudly instead of
+                # parsing the error page as price data (which silently yielded
+                # zero bars for the whole chunk).
+                r.raise_for_status()
             body = r.json()
             for sym, bars in (body.get("bars") or {}).items():
                 out[sym].extend(bars)
