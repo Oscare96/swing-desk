@@ -5,3 +5,5 @@ data/
 .env
 reports/backtest_trades.csv
 reports/backtest_equity.csv
+price_data.zip
+reports/

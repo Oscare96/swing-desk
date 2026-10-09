@@ -27,6 +27,10 @@ completed daily bars ──► deterministic signals ──► (optional LLM vet
 
 **Optional LLM veto** (`[llm] enabled = true`): it reviews candidates against recent headlines and can only *remove* a trade, for example a dip caused by an earnings miss. It can't add trades, size them or move stops. If it fails, the tested strategy runs unchanged. Every call is journaled. It's off by default because it can't be backtested honestly; turn it on later and compare paper results with it on and off.
 
+## Independent review
+
+To have another AI (ChatGPT, Muse, etc.) check the backtest, give it the code zip and **[BACKTEST_GUIDE.md](BACKTEST_GUIDE.md)**. The guide includes a prompt to paste, how to run it offline using `tools/fetch_data.py`, a code-review checklist, and a verdict template.
+
 ## The gate: nothing trades until this passes
 
 `python -m tradingbot backtest` runs 2020–2025 with costs (5 bps slippage per side). It treats **2020–2022 as in-sample and 2023–2025 as out-of-sample**, then checks the out-of-sample period:
@@ -98,6 +102,7 @@ Controls only work when `DASHBOARD_PASSWORD` is set.
 
 ```
 python -m tradingbot backtest [--source alpaca|yfinance|csv|synthetic] [--quick]
+python tools/fetch_data.py [--source yfinance|alpaca]   # save prices to data/csv + price_data.zip
 python -m tradingbot status          # unlocked or locked, and why
 python -m tradingbot run --dry-run   # today's orders, nothing sent
 python -m tradingbot serve           # scheduler + dashboard

@@ -48,7 +48,8 @@ class Desk:
     def _signals(self):
         today = self.today_fn()
         start = (today - timedelta(days=450)).isoformat()
-        bars = self.bars_loader(UNIVERSE + [self.bench], start, today.isoformat())
+        # end at yesterday: free Alpaca data can't serve the most recent 15 minutes of SIP data
+        bars = self.bars_loader(UNIVERSE + [self.bench], start, (today - timedelta(days=1)).isoformat())
         # never let today's partial bar in: decisions use completed days only
         bars = {s: df[df.index.date < today] for s, df in bars.items() if len(df)}
         spy = bars[self.bench]

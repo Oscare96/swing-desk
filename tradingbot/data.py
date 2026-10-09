@@ -145,9 +145,20 @@ def synthetic(symbols: list[str], start: str, end: str, seed: int = 7) -> dict[s
 
 
 # ---------------------------------------------------------------- entrypoint
+def default_source() -> str:
+    """DATA_SOURCE if set; else Alpaca when keys exist; else CSV files if present; else yfinance."""
+    if os.environ.get("DATA_SOURCE"):
+        return os.environ["DATA_SOURCE"]
+    if os.environ.get("ALPACA_API_KEY") and os.environ.get("ALPACA_SECRET_KEY"):
+        return "alpaca"
+    if CSV_DIR.exists() and any(CSV_DIR.glob("*.csv")):
+        return "csv"
+    return "yfinance"
+
+
 def load_bars(symbols: list[str], start: str, end: str, source: str | None = None,
               use_cache: bool = True) -> dict[str, pd.DataFrame]:
-    source = source or os.environ.get("DATA_SOURCE", "alpaca")
+    source = source or default_source()
     if source == "synthetic":
         return synthetic(symbols, start, end)
     if source == "csv":

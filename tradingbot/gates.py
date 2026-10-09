@@ -22,7 +22,7 @@ import pandas as pd
 
 from .backtest import run_backtest
 from .config import ROOT, Config
-from .data import coverage_filter, load_bars
+from .data import coverage_filter, default_source, load_bars
 from .metrics import period_report
 from .universe import UNIVERSE
 
@@ -56,7 +56,7 @@ def robustness(bars, cfg, start, end) -> dict:
 
 
 def run_gate(cfg: Config, source: str | None = None, skip_robustness: bool = False) -> dict:
-    source = source or os.environ.get("DATA_SOURCE", "alpaca")
+    source = source or default_source()
     bt = cfg.backtest
     warm_start = (pd.Timestamp(bt.start) - pd.Timedelta(days=420)).strftime("%Y-%m-%d")
     symbols = UNIVERSE + [cfg.regime.benchmark]
@@ -117,7 +117,57 @@ def run_gate(cfg: Config, source: str | None = None, skip_robustness: bool = Fal
     REPORT_PATH.write_text(json.dumps(report, indent=2, default=str))
     res.trades.to_csv(REPORT_DIR / "backtest_trades.csv", index=False)
     res.equity.to_csv(REPORT_DIR / "backtest_equity.csv")
+    (REPORT_DIR / "backtest_report.md").write_text(report_markdown(report, res))
     return report
+
+
+def _fmt_row(name, d):
+    return (f"| {name} | {d['total_return']:.1%} | {d['cagr']:.1%} | {d['sharpe']:.2f} | "
+            f"{d['max_drawdown']:.1%} | {d['vol']:.1%} |")
+
+
+def report_markdown(r: dict, res) -> str:
+    """Human-readable report to paste into chat or hand to a reviewer."""
+    L = [f"# Backtest report", "",
+         f"**Result: {'PASSED - paper trading unlocked' if r['passed'] else 'FAILED - paper trading stays locked'}**", "",
+         f"- Generated: {r['generated_at']}", f"- Data source: {r['data_source']}",
+         f"- Config hash: `{r['config_hash']}`",
+         f"- Circuit-breaker halts: {r['circuit_breaker_halts']}", ""]
+    L += ["## Gates (out-of-sample unless noted)", "", "| Check | Value | Rule | Result |", "|---|---|---|---|"]
+    for c in r["checks"]:
+        L.append(f"| {c['check']} | {c['value']} | {c['rule']} | {'PASS' if c['passed'] else 'FAIL'} |")
+    for label, key in (("In-sample", "in_sample"), ("Out-of-sample", "out_of_sample"), ("Full period", "full_period")):
+        p = r[key]
+        ts = p["trade_stats"]
+        L += ["", f"## {label}: {p['start']} to {p['end']}", "",
+              "| Sleeve | Total return | CAGR | Sharpe | Max drawdown | Volatility |", "|---|---|---|---|---|---|",
+              _fmt_row("Desk (swing trades only)", p["desk"]), _fmt_row("Satellite (desk + parked SPY)", p["satellite"]),
+              _fmt_row("Portfolio (core + satellite)", p["portfolio"]), _fmt_row("SPY buy and hold", p["spy_buy_hold"]),
+              "", f"Trades {ts['trades']}, win rate {ts['win_rate']:.1%}, profit factor {ts['profit_factor']:.2f}, "
+              f"average R {ts['avg_r']:.2f}, average hold {ts['avg_hold_days']:.1f} days. "
+              f"Regime risk-on {p['risk_on_share']:.0%} of days.",
+              f"Exit reasons: {ts['exit_reasons']}"]
+    tr = res.trades
+    if not tr.empty:
+        y = tr.assign(year=pd.to_datetime(tr["exit_date"]).dt.year).groupby("year").agg(
+            trades=("pnl", "size"), pnl=("pnl", "sum"), win_rate=("pnl", lambda x: (x > 0).mean()))
+        L += ["", "## Swing trades by year", "", "| Year | Trades | P&L | Win rate |", "|---|---|---|---|"]
+        L += [f"| {yr} | {row.trades} | {row.pnl:,.0f} | {row.win_rate:.0%} |" for yr, row in y.iterrows()]
+        top = tr.groupby("symbol")["pnl"].sum().sort_values()
+        L += ["", f"Worst symbols: {', '.join(f'{k} {v:,.0f}' for k, v in top.head(5).items())}",
+              f"Best symbols: {', '.join(f'{k} {v:,.0f}' for k, v in top.tail(5)[::-1].items())}"]
+    if r.get("robustness"):
+        rob = r["robustness"]
+        L += ["", f"## Robustness grid: {rob['profitable_share']:.0%} of {rob['grid_size']} nearby settings profitable", "",
+              "| RSI entry below | Exit SMA | Stop ATR | Trades | P&L |", "|---|---|---|---|---|"]
+        L += [f"| {x['rsi_entry_below']} | {x['exit_sma']} | {x['stop_atr_mult']} | {x['trades']} | {x['pnl']:,.0f} |"
+              for x in rob["runs"]]
+    L += ["", "## Rejected entry reasons (count)", ""]
+    L += [f"- {k}: {v}" for k, v in sorted(r["rejections"].items(), key=lambda kv: -kv[1])]
+    if r.get("symbols_dropped"):
+        L += ["", f"Dropped for missing history: {', '.join(r['symbols_dropped'])}"]
+    L += ["", "## Notes", ""] + [f"- {n}" for n in r["notes"]]
+    return "\n".join(L) + "\n"
 
 
 def load_report() -> dict | None:
